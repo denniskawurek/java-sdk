@@ -1,9 +1,14 @@
 [
   {
-    "version": "2.0.0-SNAPSHOT",
-    "title": "2.0.0-SNAPSHOT",
+    "version": "2.0.1-SNAPSHOT",
+    "title": "2.0.1-SNAPSHOT",
     "aliases": [
       "latest-snapshot"
     ]
+  },
+  {
+    "version": "2.0.0-SNAPSHOT",
+    "title": "2.0.0-SNAPSHOT",
+    "aliases": []
   }
 ]
