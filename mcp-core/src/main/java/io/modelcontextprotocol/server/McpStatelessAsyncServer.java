@@ -435,7 +435,7 @@ public class McpStatelessAsyncServer {
                     .collectList()
                     .flatMap(visibleTools -> {
                         var mapSize = visibleTools.size();
-                        var mapHash = visibleTools.hashCode();
+						var mapHash = computeToolsHash(visibleTools);
 
                         return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
                             var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
@@ -631,7 +631,7 @@ public class McpStatelessAsyncServer {
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.resources.size();
-			var mapHash = this.resources.hashCode();
+			var mapHash = computeMapKeysHash(this.resources);
 
 			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
@@ -658,7 +658,7 @@ public class McpStatelessAsyncServer {
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.resourceTemplates.size();
-			var mapHash = this.resourceTemplates.hashCode();
+			var mapHash = computeMapKeysHash(this.resourceTemplates);
 
 			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
@@ -790,7 +790,7 @@ public class McpStatelessAsyncServer {
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.prompts.size();
-			var mapHash = this.prompts.hashCode();
+			var mapHash = computeMapKeysHash(this.prompts);
 
 			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
@@ -1012,6 +1012,21 @@ public class McpStatelessAsyncServer {
 
 	private String decodeCursor(String base64Cursor) {
 		return new String(Base64.getDecoder().decode(base64Cursor));
+	}
+
+	private static int computeMapKeysHash(ConcurrentHashMap<String, ?> map) {
+		return map.keySet().stream()
+				.sorted()
+				.mapToInt(String::hashCode)
+				.reduce(0, (acc, hash) -> 31 * acc + hash);
+	}
+
+	private static int computeToolsHash(List<McpSchema.Tool> visibleTools) {
+		return visibleTools.stream()
+				.map(McpSchema.Tool::name)
+				.sorted()
+				.mapToInt(String::hashCode)
+				.reduce(0, (acc, hash) -> 31 * acc + hash);
 	}
 
 }
