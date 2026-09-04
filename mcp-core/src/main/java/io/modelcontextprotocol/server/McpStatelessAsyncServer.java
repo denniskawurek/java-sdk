@@ -639,11 +639,12 @@ public class McpStatelessAsyncServer {
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resourceList = this.resources.values()
-					.stream()
+				var resourceList = this.resources.entrySet()
+						.stream()
+						.sorted(Map.Entry.comparingByKey())
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
-					.map(McpStatelessServerFeatures.AsyncResourceSpecification::resource)
+						.map(entry -> entry.getValue().resource())
 					.toList();
 
 				return McpSchema.ListResourcesResult.builder(resourceList).nextCursor(nextCursor).build();
@@ -663,16 +664,17 @@ public class McpStatelessAsyncServer {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
+				var templateList = this.resourceTemplates.entrySet()
+						.stream()
+						.sorted(Map.Entry.comparingByKey())
+						.skip(startIndex)
+						.limit(endIndex - startIndex)
+						.map(entry -> entry.getValue().resourceTemplate())
+						.toList();
 
-				var resourceList = this.resourceTemplates.values()
-					.stream()
-					.skip(startIndex)
-					.limit(endIndex - startIndex)
-					.map(McpStatelessServerFeatures.AsyncResourceTemplateSpecification::resourceTemplate)
-					.toList();
-
-				return McpSchema.ListResourceTemplatesResult.builder(resourceList).nextCursor(nextCursor).build();
+				return McpSchema.ListResourceTemplatesResult.builder(templateList)
+						.nextCursor(getCursor(endIndex, mapSize, mapHash))
+						.build();
 			});
 		};
 	}
@@ -784,27 +786,27 @@ public class McpStatelessAsyncServer {
 
 	private McpStatelessRequestHandler<McpSchema.ListPromptsResult> promptsListRequestHandler() {
 		return (ctx, params) -> {
-            var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
-            var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
+			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
+			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
-            var mapSize = this.prompts.size();
-            var mapHash = this.prompts.hashCode();
+			var mapSize = this.prompts.size();
+			var mapHash = this.prompts.hashCode();
 
-            return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
-                var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-                var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
+				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
-                var nextCursor = getCursor(endIndex, mapSize, mapHash);
+				var promptList = this.prompts.entrySet().stream()
+						.sorted(Map.Entry.comparingByKey())
+						.skip(startIndex)
+						.limit(endIndex - startIndex)
+						.map(entry -> entry.getValue().prompt())
+						.toList();
 
-                var promptList = this.prompts.values()
-                        .stream()
-                        .skip(startIndex)
-                        .limit(endIndex - startIndex)
-                        .map(McpStatelessServerFeatures.AsyncPromptSpecification::prompt)
-                        .toList();
-
-			return Mono.just(McpSchema.ListPromptsResult.builder(promptList).nextCursor(nextCursor).build());
-            });
+				return McpSchema.ListPromptsResult.builder(promptList)
+						.nextCursor(getCursor(endIndex, mapSize, mapHash))
+						.build();
+			});
 		};
 	}
 
