@@ -80,10 +80,12 @@ public class McpStatelessAsyncServer {
 
 	private final boolean validateToolInputs;
 
-	private final TypeRef<McpSchema.PaginatedRequest> PAGINATED_REQUEST_TYPE_REF = new TypeRef<>() {
-	};
+	private final McpAsyncListFilter<McpSchema.Tool> toolFilter;
 
-	private static final int PAGE_SIZE = 10;
+    private final TypeRef<McpSchema.PaginatedRequest> PAGINATED_REQUEST_TYPE_REF = new TypeRef<>() {
+    };
+
+    private static final int PAGE_SIZE = 10;
 
 	McpStatelessAsyncServer(McpStatelessServerTransport mcpTransport, McpJsonMapper jsonMapper,
 			McpStatelessServerFeatures.Async features, Duration requestTimeout,
@@ -102,6 +104,7 @@ public class McpStatelessAsyncServer {
 		this.uriTemplateManagerFactory = uriTemplateManagerFactory;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 		this.validateToolInputs = validateToolInputs;
+		this.toolFilter = McpAsyncListFilter.and(features.toolFilters());
 
 		Map<String, McpStatelessRequestHandler<?>> requestHandlers = new HashMap<>();
 
@@ -138,8 +141,24 @@ public class McpStatelessAsyncServer {
 
 		this.protocolVersions = new ArrayList<>(mcpTransport.protocolVersions());
 
-		McpStatelessServerHandler handler = new DefaultMcpStatelessServerHandler(requestHandlers, Map.of());
+		Map<String, McpStatelessNotificationHandler> notificationHandlers = prepareNotificationHandlers();
+		McpStatelessServerHandler handler = new DefaultMcpStatelessServerHandler(requestHandlers, notificationHandlers);
 		mcpTransport.setMcpHandler(handler);
+	}
+
+	private Map<String, McpStatelessNotificationHandler> prepareNotificationHandlers() {
+		Map<String, McpStatelessNotificationHandler> notificationHandlers = new HashMap<>();
+
+		notificationHandlers.put(McpSchema.METHOD_NOTIFICATION_INITIALIZED, (exchange, params) -> {
+			logger.debug("Received {}", McpSchema.METHOD_NOTIFICATION_INITIALIZED);
+			return Mono.empty();
+		});
+		notificationHandlers.put(McpSchema.METHOD_NOTIFICATION_ROOTS_LIST_CHANGED, (exchange, params) -> {
+			logger.debug("Received {}", McpSchema.METHOD_NOTIFICATION_ROOTS_LIST_CHANGED);
+			return Mono.empty();
+		});
+
+		return notificationHandlers;
 	}
 
 	// ---------------------------------------
@@ -404,29 +423,52 @@ public class McpStatelessAsyncServer {
 		});
 	}
 
-	private McpStatelessRequestHandler<McpSchema.ListToolsResult> toolsListRequestHandler() {
-		return (exchange, params) -> {
-			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
-			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
+    private McpStatelessRequestHandler<McpSchema.ListToolsResult> toolsListRequestHandler() {
+        return (exchange, params) -> {
+            var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
+            var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
-			var mapSize = this.tools.size();
-			var mapHash = this.tools.hashCode();
+            return Flux.fromIterable(this.tools)
+                    .map(McpStatelessServerFeatures.AsyncToolSpecification::tool)
+                    .filterWhen(tool -> this.toolFilter.isVisible(exchange, tool)
+                            .onErrorResume(error -> opaqueListFilterError(tool, error)))
+                    .collectList()
+                    .flatMap(visibleTools -> {
+                        var mapSize = visibleTools.size();
+                        var mapHash = visibleTools.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
-				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+                        return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+                            var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
+                            var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
+                            var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.tools.stream()
-					.skip(startIndex)
-					.limit(endIndex - startIndex)
-					.map(McpStatelessServerFeatures.AsyncToolSpecification::tool)
-					.toList();
+                            var resultList = visibleTools.stream()
+                                    .skip(startIndex)
+                                    .limit(endIndex - startIndex)
+                                    .toList();
 
-				return McpSchema.ListToolsResult.builder(resultList).nextCursor(nextCursor).build();
-			});
-		};
+                            return McpSchema.ListToolsResult.builder(resultList)
+                                    .nextCursor(nextCursor)
+                                    .build();
+                        });
+                    });
+        };
+    }
+
+	/**
+	 * Report a list filter failure to the client as an opaque {@code -32603} error, so
+	 * that filter internals such as identity provider hostnames or the reason a principal
+	 * was rejected never leave the server. The actual cause is logged instead. An
+	 * {@link McpError} is deliberate on the filter's part and passes through untouched.
+	 */
+	private static Mono<Boolean> opaqueListFilterError(Tool tool, Throwable error) {
+		if (error instanceof McpError mcpError && mcpError.getJsonRpcError() != null) {
+			logger.debug("Tool list filter failed for tool '{}' with an explicit MCP error", tool.name(), error);
+			return Mono.error(mcpError);
+		}
+		logger.error("Tool list filter failed for tool '{}', failing the tools/list request", tool.name(), error);
+		return Mono.error(McpError.builder(ErrorCodes.INTERNAL_ERROR).message("Internal error").build());
 	}
 
 	private McpStatelessRequestHandler<CallToolResult> toolsCallRequestHandler() {
@@ -584,7 +626,7 @@ public class McpStatelessAsyncServer {
 	}
 
 	private McpStatelessRequestHandler<McpSchema.ListResourcesResult> resourcesListRequestHandler() {
-		return (exchange, params) -> {
+		return (ctx, params) -> {
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
@@ -597,14 +639,14 @@ public class McpStatelessAsyncServer {
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.resources.values()
+				var resourceList = this.resources.values()
 					.stream()
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
 					.map(McpStatelessServerFeatures.AsyncResourceSpecification::resource)
 					.toList();
 
-				return McpSchema.ListResourcesResult.builder(resultList).nextCursor(nextCursor).build();
+				return McpSchema.ListResourcesResult.builder(resourceList).nextCursor(nextCursor).build();
 			});
 		};
 	}
@@ -623,14 +665,14 @@ public class McpStatelessAsyncServer {
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.resourceTemplates.values()
+				var resourceList = this.resourceTemplates.values()
 					.stream()
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
 					.map(McpStatelessServerFeatures.AsyncResourceTemplateSpecification::resourceTemplate)
 					.toList();
 
-				return McpSchema.ListResourceTemplatesResult.builder(resultList).nextCursor(nextCursor).build();
+				return McpSchema.ListResourceTemplatesResult.builder(resourceList).nextCursor(nextCursor).build();
 			});
 		};
 	}
@@ -657,33 +699,34 @@ public class McpStatelessAsyncServer {
 	}
 
 	private Optional<McpStatelessServerFeatures.AsyncResourceSpecification> findResourceSpecification(String uri) {
-		var result = this.resources.values()
-			.stream()
-			.filter(spec -> this.uriTemplateManagerFactory.create(spec.resource().uri()).matches(uri))
-			.findFirst();
-		return result;
-	}
+        var result = this.resources.values()
+                .stream()
+                .filter(spec -> this.uriTemplateManagerFactory.create(spec.resource().uri()).matches(uri))
+                .findFirst();
+        return result;
+    }
 
-	private Optional<McpStatelessServerFeatures.AsyncResourceTemplateSpecification> findResourceTemplateSpecification(
-			String uri) {
-		return this.resourceTemplates.values()
-			.stream()
-			.filter(spec -> this.uriTemplateManagerFactory.create(spec.resourceTemplate().uriTemplate()).matches(uri))
-			.findFirst();
-	}
+    private Optional<McpStatelessServerFeatures.AsyncResourceTemplateSpecification> findResourceTemplateSpecification(
+            String uri) {
+        return this.resourceTemplates.values()
+                .stream()
+                .filter(spec -> this.uriTemplateManagerFactory.create(spec.resourceTemplate().uriTemplate()).matches(uri))
+                .findFirst();
+    }
 
-	// ---------------------------------------
-	// Prompt Management
-	// ---------------------------------------
+    // ---------------------------------------
+    // Prompt Management
+    // ---------------------------------------
 
-	/**
-	 * Add a new prompt handler at runtime.
-	 * @param promptSpecification The prompt handler to add
-	 * @return Mono that completes when clients have been notified of the change
-	 */
-	public Mono<Void> addPrompt(McpStatelessServerFeatures.AsyncPromptSpecification promptSpecification) {
-		if (promptSpecification == null) {
-			return Mono.error(new IllegalArgumentException("Prompt specification must not be null"));
+    /**
+     * Add a new prompt handler at runtime.
+     *
+     * @param promptSpecification The prompt handler to add
+     * @return Mono that completes when clients have been notified of the change
+     */
+    public Mono<Void> addPrompt(McpStatelessServerFeatures.AsyncPromptSpecification promptSpecification) {
+        if (promptSpecification == null) {
+            return Mono.error(new IllegalArgumentException("Prompt specification must not be null"));
 		}
 		if (this.serverCapabilities.prompts() == null) {
 			return Mono.error(new IllegalStateException("Server must be configured with prompt capabilities"));
@@ -740,28 +783,28 @@ public class McpStatelessAsyncServer {
 	}
 
 	private McpStatelessRequestHandler<McpSchema.ListPromptsResult> promptsListRequestHandler() {
-		return (exchange, params) -> {
-			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
-			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
+		return (ctx, params) -> {
+            var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
+            var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
-			var mapSize = this.prompts.size();
-			var mapHash = this.prompts.hashCode();
+            var mapSize = this.prompts.size();
+            var mapHash = this.prompts.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
-				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+            return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
+                var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
+                var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
+                var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.prompts.values()
-					.stream()
-					.skip(startIndex)
-					.limit(endIndex - startIndex)
-					.map(McpStatelessServerFeatures.AsyncPromptSpecification::prompt)
-					.toList();
+                var promptList = this.prompts.values()
+                        .stream()
+                        .skip(startIndex)
+                        .limit(endIndex - startIndex)
+                        .map(McpStatelessServerFeatures.AsyncPromptSpecification::prompt)
+                        .toList();
 
-				return McpSchema.ListPromptsResult.builder(resultList).nextCursor(nextCursor).build();
-			});
+			return Mono.just(McpSchema.ListPromptsResult.builder(promptList).nextCursor(nextCursor).build());
+            });
 		};
 	}
 

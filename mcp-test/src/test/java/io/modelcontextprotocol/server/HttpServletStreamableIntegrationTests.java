@@ -4,6 +4,12 @@
 
 package io.modelcontextprotocol.server;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -20,11 +26,13 @@ import io.modelcontextprotocol.server.transport.HttpServletStreamableServerTrans
 import io.modelcontextprotocol.server.transport.TomcatTestUtil;
 import io.modelcontextprotocol.spec.McpSchema;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.apache.catalina.LifecycleException;
 import org.apache.catalina.LifecycleState;
 import org.apache.catalina.startup.Tomcat;
-import org.awaitility.Awaitility;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -33,6 +41,7 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 @Timeout(15)
 class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerIntegrationTests {
@@ -41,12 +50,50 @@ class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerInteg
 
 	private static final String MESSAGE_ENDPOINT = "/mcp/message";
 
+	// Tomcat is started once for the whole class; each test swaps in its own transport
+	private static final TomcatTestUtil.DelegatingServlet MCP_SERVLET = new TomcatTestUtil.DelegatingServlet();
+
+	private static Tomcat tomcat;
+
 	private HttpServletStreamableServerTransportProvider mcpServerTransportProvider;
 
-	private Tomcat tomcat;
+	@Override
+	protected void awaitClientStreamEstablished() {
+		var timeout = Duration.ofSeconds(5);
+		await().atMost(timeout).untilAsserted(() -> {
+			assertThat(MCP_SERVLET.isStreamEstablished())
+				.withFailMessage("[Failed to observe MCP Client connection within %s]", timeout)
+				.isTrue();
+		});
+	}
 
 	static Stream<Arguments> clientsForTesting() {
 		return Stream.of(Arguments.of("httpclient"));
+	}
+
+	@BeforeAll
+	public static void beforeAll() {
+		tomcat = TomcatTestUtil.createTomcatServer("", PORT, MCP_SERVLET);
+		try {
+			tomcat.start();
+			assertThat(tomcat.getServer().getState()).isEqualTo(LifecycleState.STARTED);
+		}
+		catch (Exception e) {
+			throw new RuntimeException("Failed to start Tomcat", e);
+		}
+	}
+
+	@AfterAll
+	public static void afterAll() {
+		if (tomcat != null) {
+			try {
+				tomcat.stop();
+				tomcat.destroy();
+			}
+			catch (LifecycleException e) {
+				throw new RuntimeException("Failed to stop Tomcat", e);
+			}
+		}
 	}
 
 	@BeforeEach
@@ -56,16 +103,15 @@ class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerInteg
 			.contextExtractor(TEST_CONTEXT_EXTRACTOR)
 			.mcpEndpoint(MESSAGE_ENDPOINT)
 			.keepAliveInterval(Duration.ofSeconds(1))
+			.maxRequestSize(MAX_REQUEST_SIZE)
 			.build();
+		MCP_SERVLET.setDelegate(mcpServerTransportProvider);
 
-		tomcat = TomcatTestUtil.createTomcatServer("", PORT, mcpServerTransportProvider);
-		try {
-			tomcat.start();
-			assertThat(tomcat.getServer().getState()).isEqualTo(LifecycleState.STARTED);
-		}
-		catch (Exception e) {
-			throw new RuntimeException("Failed to start Tomcat", e);
-		}
+		clientBuilders
+			.put("httpclient",
+					McpClient.sync(HttpClientStreamableHttpTransport.builder("http://localhost:" + PORT)
+						.endpoint(MESSAGE_ENDPOINT)
+						.build()).requestTimeout(Duration.ofHours(10)));
 	}
 
 	@Override
@@ -78,28 +124,10 @@ class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerInteg
 		return McpServer.sync(this.mcpServerTransportProvider);
 	}
 
-	@Override
-	protected McpClient.SyncSpec getMcpClientBuilder() {
-		return McpClient
-			.sync(HttpClientStreamableHttpTransport.builder("http://localhost:" + PORT)
-				.endpoint(MESSAGE_ENDPOINT)
-				.build())
-			.requestTimeout(Duration.ofHours(10));
-	}
-
 	@AfterEach
 	public void after() {
 		if (mcpServerTransportProvider != null) {
 			mcpServerTransportProvider.closeGracefully().block();
-		}
-		if (tomcat != null) {
-			try {
-				tomcat.stop();
-				tomcat.destroy();
-			}
-			catch (LifecycleException e) {
-				throw new RuntimeException("Failed to stop Tomcat", e);
-			}
 		}
 	}
 
@@ -133,7 +161,7 @@ class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerInteg
 				.verifyComplete();
 
 			// Wait until we've received the response
-			Awaitility.await().atMost(Duration.ofSeconds(1)).until(() -> response.get() != null);
+			await().atMost(Duration.ofSeconds(1)).until(() -> response.get() != null);
 
 			assertThat(response.get().error().code()).isEqualTo(McpSchema.ErrorCodes.METHOD_NOT_FOUND);
 			assertThat(response.get().error().message()).isEqualTo("Method not found: foo/bar");
@@ -141,10 +169,53 @@ class HttpServletStreamableIntegrationTests extends AbstractMcpClientServerInteg
 		finally {
 			mcpServer.close();
 		}
+	}
 
+	@Override
+	protected void prepareClients(int port, String mcpEndpoint) {
 	}
 
 	static McpTransportContextExtractor<HttpServletRequest> TEST_CONTEXT_EXTRACTOR = (r) -> McpTransportContext
 		.create(Map.of("important", "value"));
+
+	@Test
+	void rejectsWhenBodyBytesExceedLimitWithoutContentLengthHeader() throws Exception {
+		var httpClient = HttpClient.newHttpClient();
+		// A publisher with unknown content length forces chunked transfer encoding,
+		// bypassing the Content-Length header check and exercising the body byte
+		// count
+		byte[] oversizedBody = "a".repeat(MAX_REQUEST_SIZE + 1).getBytes(StandardCharsets.UTF_8);
+		HttpRequest.BodyPublisher chunkedPublisher = new HttpRequest.BodyPublisher() {
+			@Override
+			public long contentLength() {
+				return -1;
+			}
+
+			@Override
+			public void subscribe(java.util.concurrent.Flow.Subscriber<? super ByteBuffer> subscriber) {
+				subscriber.onSubscribe(new java.util.concurrent.Flow.Subscription() {
+					@Override
+					public void request(long n) {
+						subscriber.onNext(ByteBuffer.wrap(oversizedBody));
+						subscriber.onComplete();
+					}
+
+					@Override
+					public void cancel() {
+					}
+				});
+			}
+		};
+
+		var request = HttpRequest.newBuilder()
+			.uri(URI.create("http://localhost:" + PORT + MESSAGE_ENDPOINT))
+			.header("Content-Type", "application/json")
+			.header("Accept", "text/event-stream, application/json")
+			.POST(chunkedPublisher)
+			.build();
+
+		var response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+		assertThat(response.statusCode()).isEqualTo(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE);
+	}
 
 }

@@ -119,6 +119,8 @@ public class McpAsyncServer {
 
 	private final ConcurrentHashMap<String, Set<String>> resourceSubscriptions = new ConcurrentHashMap<>();
 
+	private final McpAsyncListFilter<McpSchema.Tool> toolFilter;
+
 	private List<String> protocolVersions;
 
 	private McpUriTemplateManagerFactory uriTemplateManagerFactory = new DefaultMcpUriTemplateManagerFactory();
@@ -152,6 +154,7 @@ public class McpAsyncServer {
 		this.uriTemplateManagerFactory = uriTemplateManagerFactory;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 		this.validateToolInputs = validateToolInputs;
+		this.toolFilter = McpAsyncListFilter.and(features.toolFilters());
 
 		Map<String, McpRequestHandler<?>> requestHandlers = prepareRequestHandlers();
 		Map<String, McpNotificationHandler> notificationHandlers = prepareNotificationHandlers(features);
@@ -183,6 +186,7 @@ public class McpAsyncServer {
 		this.uriTemplateManagerFactory = uriTemplateManagerFactory;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 		this.validateToolInputs = validateToolInputs;
+		this.toolFilter = McpAsyncListFilter.and(features.toolFilters());
 
 		Map<String, McpRequestHandler<?>> requestHandlers = prepareRequestHandlers();
 		Map<String, McpNotificationHandler> notificationHandlers = prepareNotificationHandlers(features);
@@ -541,29 +545,52 @@ public class McpAsyncServer {
 		return this.mcpTransportProvider.notifyClients(McpSchema.METHOD_NOTIFICATION_TOOLS_LIST_CHANGED, null);
 	}
 
-	private McpRequestHandler<McpSchema.ListToolsResult> toolsListRequestHandler() {
-		return (exchange, params) -> {
-			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
-			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
+    private McpRequestHandler<McpSchema.ListToolsResult> toolsListRequestHandler() {
+        return (exchange, params) -> {
+            var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
+            var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
-			var mapSize = this.tools.size();
-			var mapHash = this.tools.hashCode();
+            return Flux.fromIterable(this.tools)
+                    .map(McpServerFeatures.AsyncToolSpecification::tool)
+                    .filterWhen(tool -> this.toolFilter.isVisible(exchange.transportContext(), tool)
+                            .onErrorResume(error -> opaqueListFilterError(tool, error)))
+                    .collectList()
+                    .flatMap(visibleTools -> {
+                        var mapSize = visibleTools.size();
+                        var mapHash = visibleTools.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
-				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+                        return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+                            var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
+                            var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
+                            var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.tools.stream()
-					.skip(startIndex)
-					.limit(endIndex - startIndex)
-					.map(McpServerFeatures.AsyncToolSpecification::tool)
-					.toList();
+                            var resultList = visibleTools.stream()
+                                    .skip(startIndex)
+                                    .limit(endIndex - startIndex)
+                                    .toList();
 
-				return McpSchema.ListToolsResult.builder(resultList).nextCursor(nextCursor).build();
-			});
-		};
+                            return McpSchema.ListToolsResult.builder(resultList)
+                                    .nextCursor(nextCursor)
+                                    .build();
+                        });
+                    });
+        };
+    }
+
+	/**
+	 * Report a list filter failure to the client as an opaque {@code -32603} error, so
+	 * that filter internals such as identity provider hostnames or the reason a principal
+	 * was rejected never leave the server. The actual cause is logged instead. An
+	 * {@link McpError} is deliberate on the filter's part and passes through untouched.
+	 */
+	private static Mono<Boolean> opaqueListFilterError(Tool tool, Throwable error) {
+		if (error instanceof McpError mcpError && mcpError.getJsonRpcError() != null) {
+			logger.debug("Tool list filter failed for tool '{}' with an explicit MCP error", tool.name(), error);
+			return Mono.error(mcpError);
+		}
+		logger.error("Tool list filter failed for tool '{}', failing the tools/list request", tool.name(), error);
+		return Mono.error(McpError.builder(ErrorCodes.INTERNAL_ERROR).message("Internal error").build());
 	}
 
 	private McpRequestHandler<CallToolResult> toolsCallRequestHandler() {
@@ -816,20 +843,20 @@ public class McpAsyncServer {
 			var mapSize = this.resources.size();
 			var mapHash = this.resources.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.resources.values()
+				var resourceList = this.resources.values()
 					.stream()
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
 					.map(McpServerFeatures.AsyncResourceSpecification::resource)
 					.toList();
 
-				return McpSchema.ListResourcesResult.builder(resultList).nextCursor(nextCursor).build();
+				return Mono.just(McpSchema.ListResourcesResult.builder(resourceList).nextCursor(nextCursor).build());
 			});
 		};
 	}
@@ -842,20 +869,20 @@ public class McpAsyncServer {
 			var mapSize = this.resourceTemplates.size();
 			var mapHash = this.resourceTemplates.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.resourceTemplates.values()
+				var resourceList = this.resourceTemplates.values()
 					.stream()
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
 					.map(McpServerFeatures.AsyncResourceTemplateSpecification::resourceTemplate)
 					.toList();
 
-				return McpSchema.ListResourceTemplatesResult.builder(resultList).nextCursor(nextCursor).build();
+				return Mono.just(McpSchema.ListResourceTemplatesResult.builder(resourceList).nextCursor(nextCursor).build());
 			});
 		};
 	}
@@ -1003,20 +1030,20 @@ public class McpAsyncServer {
 			var mapSize = this.prompts.size();
 			var mapHash = this.prompts.hashCode();
 
-			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resultList = this.prompts.values()
+				var promptList = this.prompts.values()
 					.stream()
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
 					.map(McpServerFeatures.AsyncPromptSpecification::prompt)
 					.toList();
 
-				return McpSchema.ListPromptsResult.builder(resultList).nextCursor(nextCursor).build();
+				return Mono.just(McpSchema.ListPromptsResult.builder(promptList).nextCursor(nextCursor).build());
 			});
 		};
 	}
