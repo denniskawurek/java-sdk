@@ -128,7 +128,7 @@ public class McpAsyncServer {
 	private final TypeRef<McpSchema.PaginatedRequest> PAGINATED_REQUEST_TYPE_REF = new TypeRef<>() {
 	};
 
-	private static final int PAGE_SIZE = 10;
+	private final int pageSize;
 
 	/**
 	 * Create a new McpAsyncServer with the given transport provider and capabilities.
@@ -140,7 +140,7 @@ public class McpAsyncServer {
 	McpAsyncServer(McpServerTransportProvider mcpTransportProvider, McpJsonMapper jsonMapper,
 			McpServerFeatures.Async features, Duration requestTimeout,
 			McpUriTemplateManagerFactory uriTemplateManagerFactory, JsonSchemaValidator jsonSchemaValidator,
-			boolean validateToolInputs) {
+			boolean validateToolInputs, int pageSize) {
 		this.mcpTransportProvider = mcpTransportProvider;
 		this.jsonMapper = jsonMapper;
 		this.serverInfo = features.serverInfo();
@@ -154,6 +154,7 @@ public class McpAsyncServer {
 		this.uriTemplateManagerFactory = uriTemplateManagerFactory;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 		this.validateToolInputs = validateToolInputs;
+		this.pageSize = pageSize;
 		this.toolFilter = McpAsyncListFilter.and(features.toolFilters());
 
 		Map<String, McpRequestHandler<?>> requestHandlers = prepareRequestHandlers();
@@ -172,7 +173,7 @@ public class McpAsyncServer {
 	McpAsyncServer(McpStreamableServerTransportProvider mcpTransportProvider, McpJsonMapper jsonMapper,
 			McpServerFeatures.Async features, Duration requestTimeout,
 			McpUriTemplateManagerFactory uriTemplateManagerFactory, JsonSchemaValidator jsonSchemaValidator,
-			boolean validateToolInputs) {
+			boolean validateToolInputs, int pageSize) {
 		this.mcpTransportProvider = mcpTransportProvider;
 		this.jsonMapper = jsonMapper;
 		this.serverInfo = features.serverInfo();
@@ -186,6 +187,7 @@ public class McpAsyncServer {
 		this.uriTemplateManagerFactory = uriTemplateManagerFactory;
 		this.jsonSchemaValidator = jsonSchemaValidator;
 		this.validateToolInputs = validateToolInputs;
+		this.pageSize = pageSize;
 		this.toolFilter = McpAsyncListFilter.and(features.toolFilters());
 
 		Map<String, McpRequestHandler<?>> requestHandlers = prepareRequestHandlers();
@@ -556,12 +558,15 @@ public class McpAsyncServer {
 					.onErrorResume(error -> opaqueListFilterError(tool, error)))
 				.collectList()
 				.flatMap(visibleTools -> {
+					if (pageSize <= 0) {
+						return Mono.just(McpSchema.ListToolsResult.builder(visibleTools).build());
+					}
 					var mapSize = visibleTools.size();
 					var mapHash = visibleTools.hashCode();
 
 					return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 						var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-						var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+						var endIndex = Math.min(startIndex + pageSize, mapSize);
 
 						var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
@@ -832,6 +837,13 @@ public class McpAsyncServer {
 
 	private McpRequestHandler<McpSchema.ListResourcesResult> resourcesListRequestHandler() {
 		return (exchange, params) -> {
+			if (pageSize <= 0) {
+				var resourceList = this.resources.values()
+					.stream()
+					.map(McpServerFeatures.AsyncResourceSpecification::resource)
+					.toList();
+				return Mono.just(McpSchema.ListResourcesResult.builder(resourceList).build());
+			}
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
@@ -840,7 +852,7 @@ public class McpAsyncServer {
 
 			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
@@ -858,6 +870,14 @@ public class McpAsyncServer {
 
 	private McpRequestHandler<McpSchema.ListResourceTemplatesResult> resourceTemplateListRequestHandler() {
 		return (exchange, params) -> {
+			if (pageSize <= 0) {
+				var resourceList = this.resourceTemplates.values()
+					.stream()
+					.map(McpServerFeatures.AsyncResourceTemplateSpecification::resourceTemplate)
+					.toList();
+				return Mono.just(McpSchema.ListResourceTemplatesResult.builder(resourceList).build());
+			}
+
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
@@ -866,7 +886,7 @@ public class McpAsyncServer {
 
 			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
@@ -1020,6 +1040,15 @@ public class McpAsyncServer {
 
 	private McpRequestHandler<McpSchema.ListPromptsResult> promptsListRequestHandler() {
 		return (exchange, params) -> {
+			if (pageSize <= 0) {
+				var promptList = this.prompts.values()
+					.stream()
+					.map(McpServerFeatures.AsyncPromptSpecification::prompt)
+					.toList();
+
+				return Mono.just(McpSchema.ListPromptsResult.builder(promptList).build());
+			}
+
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
@@ -1028,7 +1057,7 @@ public class McpAsyncServer {
 
 			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
-				var endIndex = Math.min(startIndex + PAGE_SIZE, mapSize);
+				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
