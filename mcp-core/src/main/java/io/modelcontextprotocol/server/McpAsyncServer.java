@@ -562,7 +562,7 @@ public class McpAsyncServer {
 					var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 					var mapSize = visibleTools.size();
-					var mapHash = visibleTools.hashCode();
+					var mapHash = computeToolsHash(visibleTools);
 
 					return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 						var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
@@ -844,26 +844,28 @@ public class McpAsyncServer {
 					.toList();
 				return Mono.just(McpSchema.ListResourcesResult.builder(resourceList).build());
 			}
+
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.resources.size();
-			var mapHash = this.resources.hashCode();
+			var mapHash = computeMapKeysHash(this.resources);
 
-			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
 				var nextCursor = getCursor(endIndex, mapSize, mapHash);
 
-				var resourceList = this.resources.values()
+				var resourceList = this.resources.entrySet()
 					.stream()
+					.sorted(Map.Entry.comparingByKey())
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
-					.map(McpServerFeatures.AsyncResourceSpecification::resource)
+					.map(entry -> entry.getValue().resource())
 					.toList();
 
-				return Mono.just(McpSchema.ListResourcesResult.builder(resourceList).nextCursor(nextCursor).build());
+				return McpSchema.ListResourcesResult.builder(resourceList).nextCursor(nextCursor).build();
 			});
 		};
 	}
@@ -877,28 +879,27 @@ public class McpAsyncServer {
 					.toList();
 				return Mono.just(McpSchema.ListResourceTemplatesResult.builder(resourceList).build());
 			}
-
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.resourceTemplates.size();
-			var mapHash = this.resourceTemplates.hashCode();
+			var mapHash = computeMapKeysHash(this.resourceTemplates);
 
-			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
-
-				var resourceList = this.resourceTemplates.values()
+				var templateList = this.resourceTemplates.entrySet()
 					.stream()
+					.sorted(Map.Entry.comparingByKey())
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
-					.map(McpServerFeatures.AsyncResourceTemplateSpecification::resourceTemplate)
+					.map(entry -> entry.getValue().resourceTemplate())
 					.toList();
 
-				return Mono
-					.just(McpSchema.ListResourceTemplatesResult.builder(resourceList).nextCursor(nextCursor).build());
+				return McpSchema.ListResourceTemplatesResult.builder(templateList)
+					.nextCursor(getCursor(endIndex, mapSize, mapHash))
+					.build();
 			});
 		};
 	}
@@ -1048,27 +1049,27 @@ public class McpAsyncServer {
 
 				return Mono.just(McpSchema.ListPromptsResult.builder(promptList).build());
 			}
-
 			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
 			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
 
 			var mapSize = this.prompts.size();
-			var mapHash = this.prompts.hashCode();
+			var mapHash = computeMapKeysHash(this.prompts);
 
-			return handleCursor(cursor, mapSize, mapHash).flatMap(requestedStartIndex -> {
+			return handleCursor(cursor, mapSize, mapHash).map(requestedStartIndex -> {
 				var startIndex = requestedStartIndex != null ? requestedStartIndex : 0;
 				var endIndex = Math.min(startIndex + pageSize, mapSize);
 
-				var nextCursor = getCursor(endIndex, mapSize, mapHash);
-
-				var promptList = this.prompts.values()
+				var promptList = this.prompts.entrySet()
 					.stream()
+					.sorted(Map.Entry.comparingByKey())
 					.skip(startIndex)
 					.limit(endIndex - startIndex)
-					.map(McpServerFeatures.AsyncPromptSpecification::prompt)
+					.map(entry -> entry.getValue().prompt())
 					.toList();
 
-				return Mono.just(McpSchema.ListPromptsResult.builder(promptList).nextCursor(nextCursor).build());
+				return McpSchema.ListPromptsResult.builder(promptList)
+					.nextCursor(getCursor(endIndex, mapSize, mapHash))
+					.build();
 			});
 		};
 	}
@@ -1301,6 +1302,18 @@ public class McpAsyncServer {
 
 	private String decodeCursor(String base64Cursor) {
 		return new String(Base64.getDecoder().decode(base64Cursor));
+	}
+
+	private static int computeMapKeysHash(ConcurrentHashMap<String, ?> map) {
+		return map.keySet().stream().sorted().mapToInt(String::hashCode).reduce(0, (acc, hash) -> 31 * acc + hash);
+	}
+
+	private static int computeToolsHash(List<McpSchema.Tool> visibleTools) {
+		return visibleTools.stream()
+			.map(McpSchema.Tool::name)
+			.sorted()
+			.mapToInt(String::hashCode)
+			.reduce(0, (acc, hash) -> 31 * acc + hash);
 	}
 
 }
