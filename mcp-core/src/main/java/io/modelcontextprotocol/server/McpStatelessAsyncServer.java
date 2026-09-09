@@ -426,9 +426,6 @@ public class McpStatelessAsyncServer {
 
 	private McpStatelessRequestHandler<McpSchema.ListToolsResult> toolsListRequestHandler() {
 		return (exchange, params) -> {
-			var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
-			var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
-
 			return Flux.fromIterable(this.tools)
 				.map(McpStatelessServerFeatures.AsyncToolSpecification::tool)
 				.filterWhen(tool -> this.toolFilter.isVisible(exchange, tool)
@@ -438,6 +435,9 @@ public class McpStatelessAsyncServer {
 					if (pageSize <= 0) {
 						return Mono.just(McpSchema.ListToolsResult.builder(visibleTools).build());
 					}
+					var paginatedRequest = jsonMapper.convertValue(params, PAGINATED_REQUEST_TYPE_REF);
+					var cursor = paginatedRequest != null ? paginatedRequest.cursor() : null;
+
 					var mapSize = visibleTools.size();
 					var mapHash = computeToolsHash(visibleTools);
 
